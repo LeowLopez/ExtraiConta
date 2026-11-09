@@ -150,11 +150,15 @@ async function processSelectedFile() {
     ui.resultState.textContent = extracted === 0 ? "Medições não localizadas" : missing ? "Leitura parcial" : "Pronto para revisar";
     ui.resultState.className = extracted === 0 ? "state-pill state-error" : missing ? "state-pill state-review" : "state-pill state-ready";
     if (extracted === 0) {
-      setStatus(`Não encontramos medições do medidor ${currentConfig.meterNumber}. Confira se a fatura é da unidade configurada e se a tabela está legível.`, "error");
+      const meterMessage = currentConfig.meterNumber
+        ? `Não encontramos medições para o medidor configurado (${currentConfig.meterNumber}).`
+        : "Não identificamos automaticamente o número do medidor.";
+      setStatus(`${meterMessage} Em Configuração, informe o número que aparece na coluna “Medidor” da tabela de leituras da fatura. Confira também se a tabela está legível.`, "error");
     } else {
       const missingMessage = missing ? ` ${missing} campo(s) ficaram sem valor; preencha apenas depois de conferir a fatura.` : "";
       const total = result.fields.valor_bruto.status === "review" ? " O valor bruto também foi localizado." : "";
-      setStatus(`${extracted} de ${measurementCount} medições foram localizadas nas linhas do medidor ${currentConfig.meterNumber}.${total}${missingMessage} Confira os valores e a linha de origem antes de copiar.`);
+      const meterMessage = currentConfig.meterNumber ? "" : " O número do medidor foi identificado automaticamente.";
+      setStatus(`${extracted} de ${measurementCount} medições foram localizadas.${meterMessage}${total}${missingMessage} Confira os valores e a linha de origem antes de copiar.`);
     }
   } catch (error) {
     ui.resultState.textContent = "Leitura não concluída";
@@ -258,7 +262,15 @@ async function recognizePage(page, pageNumber, totalPages) {
 
 function renderResults(result) {
   ui.resultList.replaceChildren();
-  for (const definition of FIELD_DEFINITIONS) {
+  const definitions = [
+    ...FIELD_DEFINITIONS,
+    ...currentConfig.customFields.map((field) => ({
+      id: `custom_${field.id}`,
+      label: field.label,
+      kind: "number",
+    })),
+  ];
+  for (const definition of definitions) {
     const field = result.fields[definition.id];
     const card = document.createElement("article");
     card.className = "result-row";
@@ -306,7 +318,7 @@ function renderResults(result) {
     const summary = document.createElement("summary");
     summary.textContent = "Ver linha de origem";
     const source = document.createElement("pre");
-    source.textContent = field.sourceLine || `Nenhuma linha do medidor ${currentConfig.meterNumber} correspondeu a este campo.`;
+    source.textContent = field.sourceLine || "Nenhuma linha correspondeu à regra configurada.";
     origin.append(summary, source);
     card.append(content, copy, origin);
     if (field.value === null) card.classList.add("missing-result");
@@ -374,9 +386,27 @@ function renderConfig() {
   meterLabel.append(meterInput);
   const meterHelp = document.createElement("p");
   meterHelp.className = "config-help";
-  meterHelp.textContent = "Só são consideradas linhas que começam com este número. Isso evita confundir as leituras de outros medidores na mesma fatura.";
+  meterHelp.textContent = "Deixe vazio para tentar identificar automaticamente. Se não for encontrado, informe o número exibido na coluna “Medidor” da tabela de leituras da fatura.";
   measurementCard.append(measurementLegend, meterLabel, meterHelp);
   ui.configFields.append(measurementCard);
+
+  const grossValueCard = document.createElement("fieldset");
+  grossValueCard.className = "config-card";
+  const grossValueLegend = document.createElement("legend");
+  grossValueLegend.textContent = "Valor bruto da fatura";
+  const grossValueLabel = document.createElement("label");
+  grossValueLabel.className = "form-label";
+  grossValueLabel.textContent = "Textos imediatamente antes do valor (um por linha)";
+  const grossValueInput = document.createElement("textarea");
+  grossValueInput.rows = 4;
+  grossValueInput.value = currentConfig.grossValueAliases.join("\n");
+  grossValueInput.dataset.grossValueAliases = "";
+  grossValueLabel.append(grossValueInput);
+  const grossValueHelp = document.createElement("p");
+  grossValueHelp.className = "config-help";
+  grossValueHelp.textContent = "A busca também verifica o valor logo abaixo do rótulo, como em “Valor do documento”.";
+  grossValueCard.append(grossValueLegend, grossValueLabel, grossValueHelp);
+  ui.configFields.append(grossValueCard);
 
   const infoCard = document.createElement("fieldset");
   infoCard.className = "config-card config-card-info";
@@ -396,18 +426,86 @@ function renderConfig() {
     infoCard.append(label);
   }
   ui.configFields.append(infoCard);
+
+  const customFieldsCard = document.createElement("fieldset");
+  customFieldsCard.className = "config-card custom-fields-card";
+  const customFieldsLegend = document.createElement("legend");
+  customFieldsLegend.textContent = "Campos personalizados";
+  const customFieldsHelp = document.createElement("p");
+  customFieldsHelp.className = "config-help";
+  customFieldsHelp.textContent = "Crie um campo numérico, informe o rótulo que aparecerá no resultado e o texto que vem imediatamente antes do valor na fatura.";
+  const customFieldsList = document.createElement("div");
+  customFieldsList.className = "custom-fields-list";
+  customFieldsList.dataset.customFields = "";
+  for (const field of currentConfig.customFields) appendCustomFieldRow(customFieldsList, field);
+  const addCustomField = document.createElement("button");
+  addCustomField.className = "button button-quiet";
+  addCustomField.type = "button";
+  addCustomField.textContent = "Adicionar campo";
+  addCustomField.dataset.addCustomField = "";
+  customFieldsCard.append(customFieldsLegend, customFieldsHelp, customFieldsList, addCustomField);
+  ui.configFields.append(customFieldsCard);
+}
+
+function appendCustomFieldRow(container, field = {}) {
+  const row = document.createElement("div");
+  row.className = "custom-field-row";
+  row.dataset.customFieldId = field.id || crypto.randomUUID();
+
+  const label = document.createElement("label");
+  label.className = "form-label";
+  label.textContent = "Rótulo";
+  const labelInput = document.createElement("input");
+  labelInput.type = "text";
+  labelInput.maxLength = 80;
+  labelInput.value = field.label || "";
+  labelInput.placeholder = "Ex.: Consumo total";
+  labelInput.dataset.customLabel = "";
+  label.append(labelInput);
+
+  const prefix = document.createElement("label");
+  prefix.className = "form-label";
+  prefix.textContent = "Texto antes do valor";
+  const prefixInput = document.createElement("input");
+  prefixInput.type = "text";
+  prefixInput.maxLength = 120;
+  prefixInput.value = field.prefix || "";
+  prefixInput.placeholder = "Ex.: Consumo total:";
+  prefixInput.dataset.customPrefix = "";
+  prefix.append(prefixInput);
+
+  const remove = document.createElement("button");
+  remove.className = "button button-quiet";
+  remove.type = "button";
+  remove.textContent = "Remover";
+  remove.setAttribute("aria-label", `Remover campo ${field.label || "personalizado"}`);
+  remove.addEventListener("click", () => row.remove());
+  row.append(label, prefix, remove);
+  container.append(row);
 }
 
 function readConfigForm() {
   const config = structuredClone(currentConfig);
   config.meterNumber = document.querySelector("[data-meter-number]").value.trim();
+  config.grossValueAliases = document.querySelector("[data-gross-value-aliases]")
+    .value.split(/\r?\n/).map((term) => term.trim()).filter(Boolean);
   document.querySelectorAll("[data-info]").forEach((input) => {
     config.info[input.dataset.info].aliases = input.value.split(/\r?\n/).map((term) => term.trim()).filter(Boolean);
   });
+  config.customFields = [...document.querySelectorAll("[data-custom-field-id]")].map((row) => ({
+    id: row.dataset.customFieldId,
+    label: row.querySelector("[data-custom-label]").value.trim(),
+    prefix: row.querySelector("[data-custom-prefix]").value.trim(),
+  }));
   return validateConfig(config);
 }
 
 function bindConfigurationActions() {
+  ui.configFields.addEventListener("click", (event) => {
+    if (event.target.closest("[data-add-custom-field]")) {
+      appendCustomFieldRow(document.querySelector("[data-custom-fields]"));
+    }
+  });
   document.querySelector("#save-config").addEventListener("click", () => {
     try {
       currentConfig = readConfigForm();

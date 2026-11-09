@@ -36,17 +36,24 @@ repositório.
 - Páginas digitalizadas usam OCR em português e inglês. Na primeira utilização,
   é necessário carregar o mecanismo e os modelos; a tela **Configuração**
   permite preparar o OCR para uso offline.
-- As medições são identificadas pelo número do medidor, pela grandeza
-  (`ENRG ATV`, `DEMANDA` ou `ENRG RTV`) e pelo posto horário. O leitor ignora os
-  três números de registro e usa o valor seguinte. Consumo fora de ponta soma
-  as linhas correspondentes; os demais campos usam a primeira correspondência.
+- O leitor tenta identificar o número do medidor pelas linhas de leitura. Se
+  não encontrar um único candidato confiável, informe em **Configuração** o
+  número exibido na coluna **Medidor** da tabela de leituras. As medições usam
+  a grandeza (`ENRG ATV`, `DEMANDA` ou `ENRG RTV`) e o posto horário; os três
+  números de registro são ignorados. Consumo fora de ponta soma as linhas
+  correspondentes; os demais campos usam a primeira correspondência.
 - Demandas contratadas são extraídas dos valores identificados na fatura.
+- Datas são procuradas junto aos rótulos da fatura e também nas linhas de
+  valores logo abaixo; bandeiras só são aceitas quando associadas ao texto da
+  bandeira aplicada, evitando confusão com cobranças de adicionais.
+- Os rótulos usados para localizar o valor bruto podem ser editados em
+  **Configuração**. Também é possível criar campos numéricos personalizados
+  indicando um rótulo de resultado e o texto imediatamente anterior ao valor.
 - Campos ausentes permanecem sem valor. Confira as linhas de origem e revise
   valores e separadores decimais antes de copiar.
 
-O número do medidor pode ser alterado em **Configuração**. Preferências e
-regras ficam no armazenamento local do navegador; use **Exportar regras** para
-fazer backup ou transferi-las para outro dispositivo.
+Preferências e regras ficam no armazenamento local do navegador; use
+**Exportar regras** para fazer backup ou transferi-las para outro dispositivo.
 
 ## Instalação e privacidade
 

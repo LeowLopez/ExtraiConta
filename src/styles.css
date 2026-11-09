@@ -172,6 +172,11 @@ h1, h2, p { margin-top: 0; }
 .config-card-info { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .config-card-info legend { grid-column: 1 / -1; }
 .config-card-info .form-label { margin-top: 0; }
+.custom-fields-card { grid-column: 1 / -1; }
+.custom-fields-list { display: grid; gap: 10px; margin: 12px 0; }
+.custom-field-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.3fr) auto; align-items: end; gap: 10px; }
+.custom-field-row .form-label { margin-top: 0; }
+.footer-credit { font: 12px "Segoe UI", Arial, sans-serif; letter-spacing: normal; }
 .settings-footer { display: flex; justify-content: space-between; align-items: center; gap: 18px; margin: 12px 0 17px; }
 .settings-footer .status-message { margin: 0; }
 .ocr-panel { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px; }
@@ -319,6 +324,8 @@ h1, h2, p { margin-top: 0; }
   .config-grid { grid-template-columns: 1fr; }
   .config-card-info { grid-column: auto; grid-template-columns: 1fr; }
   .config-card-info legend { grid-column: auto; }
+  .custom-fields-card { grid-column: auto; }
+  .custom-field-row { grid-template-columns: 1fr; }
   .fixed-value-label { max-width: none; }
   .settings-footer { gap: 8px; }
   .settings-footer .settings-actions { justify-content: flex-end; }

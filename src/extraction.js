@@ -1,5 +1,11 @@
 export const STORAGE_KEY = "energia-clara-rules-v1";
-export const DEFAULT_METER_NUMBER = "15787805";
+export const DEFAULT_METER_NUMBER = "";
+const DEFAULT_GROSS_VALUE_ALIASES = [
+  "VALOR BRUTO",
+  "TOTAL BRUTO",
+  "VALOR TOTAL DA FATURA",
+  "VALOR DO DOCUMENTO",
+];
 
 export const FIELD_DEFINITIONS = [
   {
@@ -70,9 +76,10 @@ export const FIELD_DEFINITIONS = [
     id: "valor_bruto",
     label: "Valor bruto da fatura",
     kind: "currency",
-    aliases: ["VALOR BRUTO", "TOTAL BRUTO", "VALOR TOTAL DA FATURA"],
+    aliases: DEFAULT_GROSS_VALUE_ALIASES,
     operation: "first",
     valueIndex: -1,
+    nextLine: true,
   },
 ];
 
@@ -91,7 +98,7 @@ const LEGACY_FIELD_IDS = [
 export const INFO_DEFINITIONS = [
   { id: "issueDate", label: "Data de emissão", aliases: ["DATA DE EMISSÃO", "DATA DA EMISSÃO", "EMISSÃO"] },
   { id: "dueDate", label: "Vencimento", aliases: ["DATA DE VENCIMENTO", "VENCIMENTO", "PAGAR ATÉ"] },
-  { id: "tariffFlag", label: "Bandeira tarifária", aliases: ["BANDEIRA TARIFÁRIA", "BANDEIRA TARIFARIA", "BANDEIRA"] },
+  { id: "tariffFlag", label: "Bandeira tarifária", aliases: ["BANDEIRA TARIFÁRIA", "BANDEIRA TARIFARIA", "BANDEIRA(S) TARIFÁRIA(S)"] },
 ];
 
 export function normalizeText(value) {
@@ -105,8 +112,10 @@ export function normalizeText(value) {
 
 export function createDefaultConfig() {
   return {
-    version: 3,
+    version: 4,
     meterNumber: DEFAULT_METER_NUMBER,
+    grossValueAliases: [...DEFAULT_GROSS_VALUE_ALIASES],
+    customFields: [],
     info: Object.fromEntries(INFO_DEFINITIONS.map(({ id, aliases }) => [id, { aliases: [...aliases] }])),
   };
 }
@@ -117,13 +126,33 @@ export function validateConfig(config) {
   }
   if (config.version === 1) config = migrateLegacyConfig(config);
   else if (config.version === 2) config = migrateVersionTwoConfig(config);
-  if (config.version !== 3 || !config.info || typeof config.info !== "object") {
+  else if (config.version === 3) config = migrateVersionThreeConfig(config);
+  if (config.version !== 4 || !config.info || typeof config.info !== "object") {
     throw new Error("O arquivo não contém uma configuração compatível.");
   }
-  if (typeof config.meterNumber !== "string" || !/^\d{1,30}$/.test(config.meterNumber.trim())) {
-    throw new Error("Informe um número de medidor formado apenas por dígitos.");
+  if (typeof config.meterNumber !== "string" ||
+    (config.meterNumber.trim() !== "" && !/^\d{1,30}$/.test(config.meterNumber.trim()))) {
+    throw new Error("O número do medidor deve conter apenas dígitos ou ficar vazio para identificação automática.");
   }
   if (config.meterNumber !== config.meterNumber.trim()) config = { ...config, meterNumber: config.meterNumber.trim() };
+  if (!Array.isArray(config.grossValueAliases) ||
+    config.grossValueAliases.length > 30 ||
+    config.grossValueAliases.some((alias) => typeof alias !== "string" || alias.length > 120)) {
+    throw new Error('Regra inválida para "Valor bruto da fatura".');
+  }
+  if (!Array.isArray(config.customFields) || config.customFields.length > 20) {
+    throw new Error("A configuração pode ter no máximo 20 campos personalizados.");
+  }
+  const customFieldIds = new Set();
+  for (const field of config.customFields) {
+    if (!field || typeof field.id !== "string" || !/^[\w-]{1,80}$/.test(field.id) ||
+      customFieldIds.has(field.id) || typeof field.label !== "string" || !field.label.trim() ||
+      field.label.length > 80 || typeof field.prefix !== "string" || !field.prefix.trim() ||
+      field.prefix.length > 120) {
+      throw new Error("Cada campo personalizado precisa de um rótulo e um texto anterior ao valor.");
+    }
+    customFieldIds.add(field.id);
+  }
   for (const info of INFO_DEFINITIONS) {
     if (!config.info[info.id] || !Array.isArray(config.info[info.id].aliases) ||
       config.info[info.id].aliases.some((alias) => typeof alias !== "string")) {
@@ -157,6 +186,22 @@ function migrateLegacyConfig(config) {
 }
 
 function migrateVersionTwoConfig(config) {
+  if (typeof config.meterNumber !== "string" || !config.info || typeof config.info !== "object") {
+    throw new Error("O arquivo não contém uma configuração compatível.");
+  }
+  const migrated = createDefaultConfig();
+  migrated.meterNumber = config.meterNumber;
+  for (const definition of INFO_DEFINITIONS) {
+    const aliases = config.info[definition.id]?.aliases;
+    if (!Array.isArray(aliases) || aliases.some((alias) => typeof alias !== "string")) {
+      throw new Error(`Regra inválida para "${definition.label}".`);
+    }
+    migrated.info[definition.id].aliases = [...aliases];
+  }
+  return migrated;
+}
+
+function migrateVersionThreeConfig(config) {
   if (typeof config.meterNumber !== "string" || !config.info || typeof config.info !== "object") {
     throw new Error("O arquivo não contém uma configuração compatível.");
   }
@@ -211,7 +256,7 @@ function isNumericToken(token) {
 
 export function parseMeasurementLine(line, meterNumber = DEFAULT_METER_NUMBER, index = 0) {
   const parts = String(line).trim().split(/\s+/);
-  if (!parts[0]?.startsWith(meterNumber)) return null;
+  if (!/^\d{1,30}$/.test(parts[0] ?? "") || (meterNumber && parts[0] !== meterNumber)) return null;
 
   let cursor = 1;
   const measureParts = [];
@@ -299,6 +344,14 @@ export function extractConfiguredField(lines, rule) {
   }
   const matches = findMatchingLines(lines, rule.aliases);
   const candidates = matches.map((match) => {
+    const normalizedText = normalizeText(match.text);
+    const aliasIndex = normalizedText.indexOf(match.matchedAlias);
+    const afterAlias = extractNumberAfter(match.text, aliasIndex + match.matchedAlias.length);
+    if (afterAlias !== null) return { ...match, value: afterAlias };
+    if (rule.nextLine && lines[match.index + 1]) {
+      const nextLineValues = extractNumberCandidates(lines[match.index + 1]);
+      if (nextLineValues.length) return { ...match, text: `${match.text}\n${lines[match.index + 1]}`, value: nextLineValues.at(-1) };
+    }
     const values = extractNumberCandidates(match.text);
     const selected = rule.valueIndex === -1 ? values.at(-1) : values[rule.valueIndex];
     return selected === undefined ? null : { ...match, value: selected };
@@ -316,28 +369,78 @@ export function extractConfiguredField(lines, rule) {
   return { value: selected.value, sourceLine: selected.text, status: "review" };
 }
 
-function extractInfo(lines, definition, rule) {
+function extractNumberAfter(text, start) {
+  const suffix = String(text).slice(start);
+  const match = suffix.match(/^\s*[:=\-–]?\s*(?:R\$\s*)?(-?(?:\d{1,3}(?:\.\d{3})+|\d+)(?:,\d+)?|-?\d+(?:[.,]\d+)?)/);
+  return match ? parseLocalizedNumber(match[1]) : null;
+}
+
+function parseDates(text) {
+  return [...String(text).matchAll(/\b(\d{1,2})[./-](\d{1,2})[./-](\d{2,4})\b/g)]
+    .map(([, dayText, monthText, yearText]) => {
+      const day = Number(dayText);
+      const month = Number(monthText);
+      let year = Number(yearText);
+      if (yearText.length === 2) year += year >= 50 ? 1900 : 2000;
+      if (month < 1 || month > 12 || day < 1 || day > new Date(year, month, 0).getDate()) return null;
+      return `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}`;
+    })
+    .filter(Boolean);
+}
+
+function dateColumnIndex(line, definition, infoRules) {
+  const normalizedLine = normalizeText(line);
+  const anchors = INFO_DEFINITIONS
+    .filter((item) => item.id !== "tariffFlag")
+    .map((item) => ({
+      id: item.id,
+      index: Math.min(...(infoRules[item.id]?.aliases ?? item.aliases)
+        .map((alias) => normalizedLine.indexOf(normalizeText(alias)))
+        .filter((index) => index >= 0)),
+    }))
+    .filter((anchor) => Number.isFinite(anchor.index))
+    .sort((left, right) => left.index - right.index);
+  const selected = anchors.find((anchor) => anchor.id === definition.id);
+  if (!selected) return 0;
+  return anchors.filter((anchor) => anchor.index < selected.index).length;
+}
+
+function extractInfo(lines, definition, rule, infoRules) {
   const matches = findMatchingLines(lines, rule.aliases);
   if (!matches.length) return { value: "", sourceLine: "", status: "missing" };
-  const sourceLine = matches[0].text;
   if (definition.id === "tariffFlag") {
+    const match = matches.find(({ text }) => /APLICAD/.test(normalizeText(text))) ??
+      matches.find(({ text }) => /BANDEIRA\s+TARIFARIA/.test(normalizeText(text)) && !/ADICIONAL/.test(normalizeText(text)));
+    if (!match) return { value: "", sourceLine: "", status: "missing" };
+    const sourceLine = match.text;
     const normalizedLine = normalizeText(sourceLine).replace(/\*/g, "");
-    const appliedFlag = normalizedLine.match(/APLICADA(?:S)?(?:\s+NO\s+MES)?\s*[:\-]?\s*(.*)$/);
+    const appliedFlag = normalizedLine.match(/APLICADA(?:\s*S)?(?:\s+NO\s+MES)?\s*[:\-]?\s*(.*)$/);
     const flagContext = appliedFlag?.[1] ?? normalizedLine;
-    const flag = flagContext.match(/\b(ESCASSEZ\s+HIDRICA|VERMELHA(?:\s+PATAMAR\s+[12])?|AMARELA|VERDE)\b/);
+    const flag = flagContext.match(/\b(ESCASSEZ\s+HIDRICA|VERMELHA(?:\s+PATAMAR\s+[12]| P[12])?|AMARELA|VERDE)\b/);
     const value = flag?.[1]
       .toLocaleLowerCase("pt-BR")
       .replace(/^\p{L}/u, (letter) => letter.toLocaleUpperCase("pt-BR")) ?? "";
     return { value, sourceLine, status: value ? "review" : "missing" };
   }
-  const date = sourceLine.match(/\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b/);
-  return { value: date?.[0] ?? "", sourceLine, status: date ? "review" : "missing" };
+  for (const match of matches) {
+    const columnIndex = dateColumnIndex(match.text, definition, infoRules);
+    for (let offset = 0; offset <= 2 && match.index + offset < lines.length; offset += 1) {
+      const sourceLine = lines[match.index + offset];
+      const dates = parseDates(sourceLine);
+      if (!dates.length) continue;
+      if (offset > 0 && dates.length <= columnIndex) continue;
+      const value = dates.length === 1 ? dates[0] : dates[columnIndex] ?? "";
+      if (value) return { value, sourceLine, status: "review" };
+    }
+  }
+  return { value: "", sourceLine: "", status: "missing" };
 }
 
 export function extractInvoice(lines, config) {
   config = validateConfig(config);
+  const meterNumber = config.meterNumber || inferMeterNumber(lines);
   const measurements = lines
-    .map((line, index) => parseMeasurementLine(line, config.meterNumber, index))
+    .map((line, index) => parseMeasurementLine(line, meterNumber, index))
     .filter(Boolean);
   const fields = Object.fromEntries(FIELD_DEFINITIONS.map((definition) => {
     let result;
@@ -346,13 +449,35 @@ export function extractInvoice(lines, config) {
     } else if (definition.measure) {
       result = extractMeasurementField(measurements, definition);
     } else {
-      result = extractConfiguredField(lines, definition);
+      result = extractConfiguredField(lines, {
+        ...definition,
+        aliases: config.grossValueAliases,
+      });
     }
     return [definition.id, { ...result, kind: definition.kind }];
   }));
+  for (const customField of config.customFields) {
+    const result = extractConfiguredField(lines, {
+      aliases: [customField.prefix],
+      operation: "first",
+      valueIndex: 0,
+    });
+    fields[`custom_${customField.id}`] = { ...result, kind: "number", label: customField.label };
+  }
   const info = Object.fromEntries(INFO_DEFINITIONS.map((definition) => [
     definition.id,
-    extractInfo(lines, definition, config.info[definition.id]),
+    extractInfo(lines, definition, config.info[definition.id], config.info),
   ]));
-  return { fields, info };
+  return { fields, info, meterNumber };
+}
+
+function inferMeterNumber(lines) {
+  const counts = new Map();
+  for (const [index, line] of lines.entries()) {
+    const candidate = String(line).trim().split(/\s+/)[0];
+    if (!/^\d{5,30}$/.test(candidate) || !parseMeasurementLine(line, candidate, index)) continue;
+    counts.set(candidate, (counts.get(candidate) ?? 0) + 1);
+  }
+  const ranked = [...counts.entries()].sort((left, right) => right[1] - left[1]);
+  return ranked.length && ranked[0][1] >= 2 && ranked[0][1] > (ranked[1]?.[1] ?? 0) ? ranked[0][0] : "";
 }
