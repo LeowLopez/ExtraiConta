@@ -179,8 +179,7 @@ async function readPdfLines(file) {
       const page = await pdf.getPage(pageNumber);
       const textContent = await page.getTextContent();
       const pageLines = textItemsToLines(textContent.items);
-      const readableText = pageLines.join(" ").replace(/\s/g, "");
-      if (readableText.length >= 20) {
+      if (hasReadablePdfText(pageLines)) {
         allLines.push(...pageLines);
       } else {
         const ocrLines = await recognizePage(page, pageNumber, pdf.numPages);
@@ -191,6 +190,12 @@ async function readPdfLines(file) {
     await pdf.destroy();
   }
   return allLines.filter((line) => line.trim());
+}
+
+function hasReadablePdfText(lines) {
+  const tokens = lines.join(" ").match(/[\p{L}\p{N}]+/gu) ?? [];
+  const words = tokens.filter((token) => /^\p{L}{2,}$/u.test(token));
+  return tokens.length >= 20 && words.length >= 8 && words.length / tokens.length >= 0.15;
 }
 
 function textItemsToLines(items) {
