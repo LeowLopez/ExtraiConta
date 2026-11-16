@@ -9,6 +9,7 @@ import {
   STORAGE_KEY,
   createDefaultConfig,
   extractInvoice,
+  normalizeText,
   validateConfig,
 } from "./extraction.js";
 
@@ -44,6 +45,8 @@ let selectedFile = null;
 let currentConfig = loadConfig();
 let ocrWorkerPromise = null;
 let installPrompt = null;
+let displayedProgress = 0;
+let activeOcrProgress = null;
 
 document.querySelector("#app-version").textContent = `VERSÃO ${packageInfo.version}`;
 ui.privacyChip.hidden = !installedApp;
@@ -135,6 +138,8 @@ function setSelectedFile(file) {
 
 async function processSelectedFile() {
   if (!selectedFile) return;
+  displayedProgress = 0;
+  activeOcrProgress = null;
   setBusy(true);
   clearResults();
   try {
@@ -160,6 +165,7 @@ async function processSelectedFile() {
       const meterMessage = currentConfig.meterNumber ? "" : " O número do medidor foi identificado automaticamente.";
       setStatus(`${extracted} de ${measurementCount} medições foram localizadas.${meterMessage}${total}${missingMessage} Confira os valores e a linha de origem antes de copiar.`);
     }
+    setProgress("Leitura concluída", 1);
   } catch (error) {
     ui.resultState.textContent = "Leitura não concluída";
     ui.resultState.className = "state-pill state-error";
@@ -175,16 +181,19 @@ async function readPdfLines(file) {
   const allLines = [];
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
-      setProgress(`Lendo página ${pageNumber} de ${pdf.numPages}`, (pageNumber - 1) / pdf.numPages);
+      const pageStart = 0.05 + ((pageNumber - 1) / pdf.numPages) * 0.9;
+      const pageEnd = 0.05 + (pageNumber / pdf.numPages) * 0.9;
+      setProgress(`Lendo página ${pageNumber} de ${pdf.numPages}`, pageStart);
       const page = await pdf.getPage(pageNumber);
       const textContent = await page.getTextContent();
       const pageLines = textItemsToLines(textContent.items);
       if (hasReadablePdfText(pageLines)) {
         allLines.push(...pageLines);
       } else {
-        const ocrLines = await recognizePage(page, pageNumber, pdf.numPages);
+        const ocrLines = await recognizePage(page, pageNumber, pdf.numPages, pageStart, pageEnd);
         allLines.push(...ocrLines);
       }
+      setProgress(`Página ${pageNumber} de ${pdf.numPages} concluída`, pageEnd);
     }
   } finally {
     await pdf.destroy();
@@ -231,9 +240,13 @@ async function getOcrWorker() {
       cacheMethod: "write",
       logger: (event) => {
         if (event.status === "recognizing text") {
-          setProgress(`OCR: ${Math.round((event.progress ?? 0) * 100)}%`, event.progress ?? 0);
+          const scope = activeOcrProgress;
+          if (scope) {
+            const progress = scope.start + (event.progress ?? 0) * (scope.end - scope.start);
+            setProgress(scope.message, progress);
+          }
         } else if (event.status) {
-          setProgress(`Preparando OCR: ${event.status}`, event.progress ?? 0);
+          setProgress(`Preparando OCR: ${event.status}`, displayedProgress);
         }
       },
     });
@@ -247,7 +260,7 @@ async function getOcrWorker() {
   }
 }
 
-async function recognizePage(page, pageNumber, totalPages) {
+async function recognizePage(page, pageNumber, totalPages, pageStart, pageEnd) {
   const viewport = page.getViewport({ scale: 1 });
   const scale = Math.min(2, 2600 / Math.max(viewport.width, viewport.height));
   const canvas = document.createElement("canvas");
@@ -257,19 +270,27 @@ async function recognizePage(page, pageNumber, totalPages) {
   const context = canvas.getContext("2d", { willReadFrequently: true });
   if (!context) throw new Error("O navegador não conseguiu preparar a página para OCR.");
   await page.render({ canvasContext: context, viewport: scaledViewport }).promise;
-  setProgress(`Reconhecendo imagem ${pageNumber} de ${totalPages}`, pageNumber / totalPages);
+  const pageSpan = pageEnd - pageStart;
+  activeOcrProgress = {
+    message: `Reconhecendo texto da página ${pageNumber} de ${totalPages}`,
+    start: pageStart,
+    end: pageStart + pageSpan * 0.45,
+  };
+  setProgress(activeOcrProgress.message, activeOcrProgress.start);
   const worker = await getOcrWorker();
   const result = await worker.recognize(canvas);
   canvas.width = 0;
   canvas.height = 0;
   const lines = result.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (normalizeText(result.data.text).includes("DADOS DE MEDICAO")) {
-    lines.push(...await recognizeMeasurementTable(page, worker, pageNumber, totalPages));
+    lines.push(...await recognizeMeasurementTable(page, worker, pageNumber, totalPages,
+      pageStart + pageSpan * 0.45, pageEnd));
   }
+  activeOcrProgress = null;
   return lines;
 }
 
-async function recognizeMeasurementTable(page, worker, pageNumber, totalPages) {
+async function recognizeMeasurementTable(page, worker, pageNumber, totalPages, pageStart, pageEnd) {
   const baseViewport = page.getViewport({ scale: 1 });
   const viewport = page.getViewport({ scale: Math.min(3.2, 3200 / Math.max(baseViewport.width, baseViewport.height)) });
   const canvas = document.createElement("canvas");
@@ -293,18 +314,34 @@ async function recognizeMeasurementTable(page, worker, pageNumber, totalPages) {
     return [];
   }
   cropContext.drawImage(canvas, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, crop.width, crop.height);
-  setProgress(`Lendo a tabela de medições ${pageNumber} de ${totalPages}`, pageNumber / totalPages);
-
   try {
     await worker.setParameters({ tessedit_pageseg_mode: "6" });
+    activeOcrProgress = {
+      message: `Lendo a tabela de medições ${pageNumber} de ${totalPages}`,
+      start: pageStart,
+      end: pageStart + (pageEnd - pageStart) * 0.55,
+    };
+    setProgress(activeOcrProgress.message, activeOcrProgress.start);
     const tableResult = await worker.recognize(crop);
     const lines = repairMisreadMeterTokens(tableResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
 
     const contractCrop = createScaledCrop(canvas, 0.32, 0.57, 0.22, 0.08, 3);
+    activeOcrProgress = {
+      message: `Lendo demandas contratadas ${pageNumber} de ${totalPages}`,
+      start: pageStart + (pageEnd - pageStart) * 0.55,
+      end: pageStart + (pageEnd - pageStart) * 0.75,
+    };
+    setProgress(activeOcrProgress.message, activeOcrProgress.start);
     const contractResult = await worker.recognize(contractCrop);
     lines.push(...contractResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
 
     const messageCrop = createScaledCrop(canvas, 0.07, 0.22, 0.88, 0.16, 2);
+    activeOcrProgress = {
+      message: `Lendo informações adicionais ${pageNumber} de ${totalPages}`,
+      start: pageStart + (pageEnd - pageStart) * 0.75,
+      end: pageEnd,
+    };
+    setProgress(activeOcrProgress.message, activeOcrProgress.start);
     const messageResult = await worker.recognize(messageCrop);
     lines.push(...messageResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
     messageCrop.width = 0;
@@ -316,6 +353,7 @@ async function recognizeMeasurementTable(page, worker, pageNumber, totalPages) {
     return lines;
   } finally {
     await worker.setParameters({ tessedit_pageseg_mode: "3" });
+    activeOcrProgress = null;
     canvas.width = 0;
     canvas.height = 0;
     crop.width = 0;
@@ -651,6 +689,8 @@ async function importConfig(event) {
 async function prepareOcr() {
   const button = document.querySelector("#prepare-ocr");
   button.disabled = true;
+  displayedProgress = 0;
+  activeOcrProgress = null;
   try {
     setProgress("Baixando modelos locais de OCR", 0);
     ui.progressRegion.hidden = false;
@@ -681,15 +721,16 @@ function setBusy(isBusy) {
   ui.processButton.disabled = isBusy || !selectedFile;
   ui.progressRegion.hidden = !isBusy;
   if (!isBusy) {
-    ui.progressBar.style.width = "100%";
     setTimeout(() => { ui.progressRegion.hidden = true; }, 700);
   }
 }
 
 function setProgress(message, progress) {
+  displayedProgress = Math.max(displayedProgress, Math.max(0, Math.min(1, progress)));
   ui.progressMessage.textContent = message;
-  ui.progressValue.textContent = `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`;
-  ui.progressBar.style.width = `${Math.round(Math.max(0, Math.min(1, progress)) * 100)}%`;
+  const percentage = Math.round(displayedProgress * 100);
+  ui.progressValue.textContent = `${percentage}%`;
+  ui.progressBar.style.width = `${percentage}%`;
 }
 
 function setStatus(message, kind = "info") {
