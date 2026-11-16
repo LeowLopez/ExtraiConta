@@ -9,6 +9,7 @@ import {
   STORAGE_KEY,
   createDefaultConfig,
   extractInvoice,
+  normalizeOcrMeasurementLine,
   normalizeText,
   validateConfig,
 } from "./extraction.js";
@@ -323,22 +324,15 @@ async function recognizeMeasurementTable(page, worker, pageNumber, totalPages, p
     };
     setProgress(activeOcrProgress.message, activeOcrProgress.start);
     const tableResult = await worker.recognize(crop);
-    const lines = repairMisreadMeterTokens(tableResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
-
-    const contractCrop = createScaledCrop(canvas, 0.32, 0.57, 0.22, 0.08, 3);
-    activeOcrProgress = {
-      message: `Lendo demandas contratadas ${pageNumber} de ${totalPages}`,
-      start: pageStart + (pageEnd - pageStart) * 0.55,
-      end: pageStart + (pageEnd - pageStart) * 0.75,
-    };
-    setProgress(activeOcrProgress.message, activeOcrProgress.start);
-    const contractResult = await worker.recognize(contractCrop);
-    lines.push(...contractResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    const tableLines = tableResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    const meterNumber = getOcrTableMeter(tableLines);
+    const rawTableLines = repairMisreadMeterTokens(tableLines, meterNumber);
+    const lines = rawTableLines.map((line) => normalizeOcrMeasurementLine(line, meterNumber)).filter(Boolean);
 
     const messageCrop = createScaledCrop(canvas, 0.07, 0.22, 0.88, 0.16, 2);
     activeOcrProgress = {
       message: `Lendo informações adicionais ${pageNumber} de ${totalPages}`,
-      start: pageStart + (pageEnd - pageStart) * 0.75,
+      start: pageStart + (pageEnd - pageStart) * 0.55,
       end: pageEnd,
     };
     setProgress(activeOcrProgress.message, activeOcrProgress.start);
@@ -346,8 +340,6 @@ async function recognizeMeasurementTable(page, worker, pageNumber, totalPages, p
     lines.push(...messageResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
     messageCrop.width = 0;
     messageCrop.height = 0;
-    contractCrop.width = 0;
-    contractCrop.height = 0;
     canvas.width = 0;
     canvas.height = 0;
     return lines;
@@ -374,10 +366,27 @@ function createScaledCrop(source, x, y, width, height, scale) {
   return crop;
 }
 
-function repairMisreadMeterTokens(lines) {
-  const configuredMeter = currentConfig.meterNumber;
-  if (!configuredMeter) return lines;
-  const matchingRows = lines.filter((line) => line.trim().startsWith(configuredMeter) &&
+function getOcrTableMeter(lines) {
+  if (currentConfig.meterNumber) return currentConfig.meterNumber;
+  const counts = new Map();
+  for (const line of lines) {
+    const match = line.match(/^\s*(\d{5,30})\s+.*\b(?:ENRG|DEMANDA)\b/i);
+    if (match) counts.set(match[1], (counts.get(match[1]) ?? 0) + 1);
+  }
+  const ranked = [...counts.entries()].sort((left, right) => right[1] - left[1]);
+  return ranked.length && ranked[0][1] >= 3 && ranked[0][1] > (ranked[1]?.[1] ?? 0)
+    ? ranked[0][0]
+    : "";
+}
+
+function repairMisreadMeterTokens(lines, meterNumber) {
+  if (!meterNumber) return lines;
+  const otherMeterRows = lines.some((line) => {
+    const match = line.match(/^\s*(\d{5,30})\s+.*\b(?:ENRG|DEMANDA)\b/i);
+    return match && match[1] !== meterNumber;
+  });
+  if (otherMeterRows) return lines;
+  const matchingRows = lines.filter((line) => line.trim().startsWith(meterNumber) &&
     /\b(?:ENRG|DEMANDA)\b/i.test(line));
   if (matchingRows.length < 3) return lines;
   return lines.map((line) => {
@@ -385,7 +394,7 @@ function repairMisreadMeterTokens(lines) {
     if (!match || !/\b(?:ENRG|DEMANDA)\b/i.test(match[1])) return line;
     const firstToken = line.trim().split(/\s+/, 1)[0];
     if (/^\d+$/.test(firstToken)) return line;
-    return `${configuredMeter}${match[1]}`;
+    return `${meterNumber}${match[1]}`;
   });
 }
 
