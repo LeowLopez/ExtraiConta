@@ -262,7 +262,93 @@ async function recognizePage(page, pageNumber, totalPages) {
   const result = await worker.recognize(canvas);
   canvas.width = 0;
   canvas.height = 0;
-  return result.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const lines = result.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  if (normalizeText(result.data.text).includes("DADOS DE MEDICAO")) {
+    lines.push(...await recognizeMeasurementTable(page, worker, pageNumber, totalPages));
+  }
+  return lines;
+}
+
+async function recognizeMeasurementTable(page, worker, pageNumber, totalPages) {
+  const baseViewport = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: Math.min(3.2, 3200 / Math.max(baseViewport.width, baseViewport.height)) });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return [];
+  await page.render({ canvasContext: context, viewport }).promise;
+
+  const sourceX = Math.round(canvas.width * 0.07);
+  const sourceY = Math.round(canvas.height * 0.38);
+  const sourceWidth = Math.round(canvas.width * 0.41);
+  const sourceHeight = Math.round(canvas.height * 0.25);
+  const crop = document.createElement("canvas");
+  crop.width = sourceWidth * 2;
+  crop.height = sourceHeight * 2;
+  const cropContext = crop.getContext("2d", { willReadFrequently: true });
+  if (!cropContext) {
+    canvas.width = 0;
+    canvas.height = 0;
+    return [];
+  }
+  cropContext.drawImage(canvas, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, crop.width, crop.height);
+  setProgress(`Lendo a tabela de medições ${pageNumber} de ${totalPages}`, pageNumber / totalPages);
+
+  try {
+    await worker.setParameters({ tessedit_pageseg_mode: "6" });
+    const tableResult = await worker.recognize(crop);
+    const lines = repairMisreadMeterTokens(tableResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+
+    const contractCrop = createScaledCrop(canvas, 0.32, 0.57, 0.22, 0.08, 3);
+    const contractResult = await worker.recognize(contractCrop);
+    lines.push(...contractResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+
+    const messageCrop = createScaledCrop(canvas, 0.07, 0.22, 0.88, 0.16, 2);
+    const messageResult = await worker.recognize(messageCrop);
+    lines.push(...messageResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean));
+    messageCrop.width = 0;
+    messageCrop.height = 0;
+    contractCrop.width = 0;
+    contractCrop.height = 0;
+    canvas.width = 0;
+    canvas.height = 0;
+    return lines;
+  } finally {
+    await worker.setParameters({ tessedit_pageseg_mode: "3" });
+    canvas.width = 0;
+    canvas.height = 0;
+    crop.width = 0;
+    crop.height = 0;
+  }
+}
+
+function createScaledCrop(source, x, y, width, height, scale) {
+  const sourceX = Math.round(source.width * x);
+  const sourceY = Math.round(source.height * y);
+  const sourceWidth = Math.round(source.width * width);
+  const sourceHeight = Math.round(source.height * height);
+  const crop = document.createElement("canvas");
+  crop.width = sourceWidth * scale;
+  crop.height = sourceHeight * scale;
+  const context = crop.getContext("2d", { willReadFrequently: true });
+  if (context) context.drawImage(source, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, crop.width, crop.height);
+  return crop;
+}
+
+function repairMisreadMeterTokens(lines) {
+  const configuredMeter = currentConfig.meterNumber;
+  if (!configuredMeter) return lines;
+  const matchingRows = lines.filter((line) => line.trim().startsWith(configuredMeter) &&
+    /\b(?:ENRG|DEMANDA)\b/i.test(line));
+  if (matchingRows.length < 3) return lines;
+  return lines.map((line) => {
+    const match = line.match(/^\s*\S+(\s+.*)$/);
+    if (!match || !/\b(?:ENRG|DEMANDA)\b/i.test(match[1])) return line;
+    const firstToken = line.trim().split(/\s+/, 1)[0];
+    if (/^\d+$/.test(firstToken)) return line;
+    return `${configuredMeter}${match[1]}`;
+  });
 }
 
 function renderResults(result) {

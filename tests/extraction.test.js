@@ -35,6 +35,46 @@ test("parses Enel measurement rows after the meter, measure, post, and three reg
   assert.equal(parseMeasurementLine(`${TEST_METER_NUMBER} ENRG ATV F PONTA INDU 10 20 1`, TEST_METER_NUMBER), null);
 });
 
+test("parses OCR measurement rows with joined post labels and Brazilian thousand separators", () => {
+  const line = `${TEST_METER_NUMBER} ENRG ATV FPONTAINDU 34678119 — 35.231.317 0,06300 34.851,474`;
+  assert.deepEqual(parseMeasurementLine(line, TEST_METER_NUMBER), {
+    measure: "ENRG ATV",
+    post: "F PONTA INDU",
+    value: 34851.474,
+    sourceLine: line,
+    index: 0,
+  });
+  assert.equal(parseMeasurementLine(
+    `${TEST_METER_NUMBER} ENRG RTV FPONTAINDU 7.525.711 — 7.599.144 0,06300 4.626,279`,
+    TEST_METER_NUMBER,
+  )?.value, 4626.279);
+});
+
+test("extracts meter measurements from OCR rows with the invoice table layout", () => {
+  const config = createDefaultConfig();
+  config.meterNumber = TEST_METER_NUMBER;
+  const data = extractInvoice([
+    `${TEST_METER_NUMBER} ENRG ATV PONTA 2.573.508 2.624.523 0,06300 3.213,945`,
+    `${TEST_METER_NUMBER} ENRG ATV F PONTA 6.187.033 — 6.302.825 0,06300 7.294,896`,
+    `${TEST_METER_NUMBER} ENRG ATV FPONTAINDU 34.678.119 — 35.231.317 0,06300 34.851,474`,
+    `${TEST_METER_NUMBER} DEMANDA F PONTA CAP 348 357 0,25200 89,964`,
+    `${TEST_METER_NUMBER} DEMANDA F PONTA INDU 1.301 1.233 0,25200 310,716`,
+    `${TEST_METER_NUMBER} ENRG RTV PONTA 698.548 706.221 0,06300 483,399`,
+    `${TEST_METER_NUMBER} ENRG RTV FPONTAINDU 7.525.711 — 7.599.144 0,06300 4.626,279`,
+    "GRANDEZAS CONTRATADAS",
+    "Demanda - KW 350,000 Regi",
+    "Demanda de Geração - KW 0,000",
+  ], config);
+  assert.equal(data.fields.consumo_fora_ponta.value, 42146.37);
+  assert.equal(data.fields.consumo_na_ponta.value, 3213.945);
+  assert.equal(data.fields.demanda_faturada_fora_ponta.value, 310.716);
+  assert.equal(data.fields.demanda_faturada_ponta.value, 89.964);
+  assert.equal(data.fields.energia_reativa_fora_ponta.value, 4626.279);
+  assert.equal(data.fields.energia_reativa_ponta.value, 483.399);
+  assert.equal(data.fields.demanda_contratada_fora_ponta.value, 350);
+  assert.equal(data.fields.demanda_contratada_ponta.value, 350);
+});
+
 test("reads contracted demand values from the invoice", () => {
   const config = createDefaultConfig();
   const data = extractInvoice([

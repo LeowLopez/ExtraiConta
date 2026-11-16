@@ -250,41 +250,50 @@ function findMatchingLines(lines, aliases) {
     .sort((left, right) => right.matchedAlias.length - left.matchedAlias.length || left.index - right.index);
 }
 
-function isNumericToken(token) {
-  return /^-?\d+(?:[.,]\d+)*$/.test(token);
+function parseMeasurementValue(token) {
+  const clean = String(token).replace(/[^\d.,-]/g, "");
+  const separator = Math.max(clean.lastIndexOf("."), clean.lastIndexOf(","));
+  if (separator >= 0 && clean.length - separator - 1 === 3) {
+    const integer = clean.slice(0, separator).replace(/[.,]/g, "");
+    const value = Number(`${integer || "0"}.${clean.slice(separator + 1)}`);
+    return Number.isFinite(value) ? value : null;
+  }
+  return parseLocalizedNumber(clean);
 }
 
 export function parseMeasurementLine(line, meterNumber = DEFAULT_METER_NUMBER, index = 0) {
   const parts = String(line).trim().split(/\s+/);
   if (!/^\d{1,30}$/.test(parts[0] ?? "") || (meterNumber && parts[0] !== meterNumber)) return null;
 
-  let cursor = 1;
-  const measureParts = [];
-  while (cursor < parts.length && parts[cursor] !== "PONTA" && parts[cursor] !== "F") {
-    measureParts.push(parts[cursor]);
-    cursor += 1;
-  }
-  if (cursor === parts.length || measureParts.length === 0) return null;
+  const numericStart = parts.findIndex((part, partIndex) => partIndex > 0 && /^\d[\d.,/]*$/.test(part));
+  if (numericStart < 0) return null;
+  const rowPrefix = parts.slice(1, numericStart).join("").toUpperCase().replace(/[^A-Z]/g, "");
+  const measureDefinitions = [
+    { measure: "ENRG ATV", compact: "ENRGATV" },
+    { measure: "DEMANDA", compact: "DEMANDA" },
+    { measure: "ENRG RTV", compact: "ENRGRTV" },
+  ];
+  const posts = [
+    { post: "F PONTA INDU", compact: "FPONTAINDU" },
+    { post: "F PONTA CAP", compact: "FPONTACAP" },
+    { post: "F PONTA", compact: "FPONTA" },
+    { post: "PONTA", compact: "PONTA" },
+  ];
+  const parsed = measureDefinitions.flatMap((definition) => {
+    if (!rowPrefix.startsWith(definition.compact)) return [];
+    const remainder = rowPrefix.slice(definition.compact.length);
+    const post = posts.find((candidate) => remainder === candidate.compact);
+    return post ? [{ measure: definition.measure, post: post.post }] : [];
+  })[0];
+  if (!parsed) return null;
 
-  const postParts = [];
-  while (cursor < parts.length && !isNumericToken(parts[cursor])) {
-    postParts.push(parts[cursor]);
-    cursor += 1;
-  }
-  if (!postParts.length) return null;
-
-  let skippedReadings = 0;
-  while (cursor < parts.length && skippedReadings < 3) {
-    if (isNumericToken(parts[cursor])) skippedReadings += 1;
-    cursor += 1;
-  }
-  if (skippedReadings !== 3 || cursor >= parts.length || !isNumericToken(parts[cursor])) return null;
-
-  const value = parseLocalizedNumber(parts[cursor]);
+  const valueTokens = parts.slice(numericStart).flatMap((part) => part.match(/\d[\d.,]*/g) ?? []);
+  if (valueTokens.length < 4) return null;
+  const value = parseMeasurementValue(valueTokens.at(-1));
   if (value === null || value <= 0) return null;
   return {
-    measure: measureParts.join(" "),
-    post: postParts.join(" "),
+    measure: parsed.measure,
+    post: parsed.post,
     value,
     sourceLine: String(line),
     index,
@@ -324,6 +333,18 @@ function extractContractedDemand(lines, measurements, definition) {
   );
   if (meterMeasurement) {
     return { value: meterMeasurement.value, sourceLine: meterMeasurement.sourceLine, status: "review" };
+  }
+
+  const contractedHeader = lines.findIndex((line) => normalizeText(line).includes("GRANDEZAS CONTRATADAS"));
+  if (contractedHeader >= 0) {
+    const generalDemand = lines.slice(contractedHeader + 1, contractedHeader + 4).find((line) => {
+      const normalized = normalizeText(line);
+      return /\bDEMANDA\s*[-–]\s*KW\b/.test(normalized) && !/GERACAO/.test(normalized);
+    });
+    if (generalDemand) {
+      const value = extractNumberCandidates(generalDemand.slice(normalizeText(generalDemand).indexOf("KW") + 2))[0];
+      if (value !== undefined) return { value, sourceLine: generalDemand, status: "review" };
+    }
   }
 
   const match = lines.find(matchesPost);
