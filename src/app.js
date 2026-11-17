@@ -418,7 +418,7 @@ function renderResults(result) {
     copy.textContent = "Copiar valor";
     copy.setAttribute("aria-label", `Copiar ${definition.label}`);
     copy.setAttribute("aria-live", "polite");
-    copy.addEventListener("click", () => copyField(input, copy));
+    copy.addEventListener("click", () => copyField(input, copy, definition.kind === "currency"));
     const origin = document.createElement("details");
     origin.className = "source-detail";
     const summary = document.createElement("summary");
@@ -458,8 +458,10 @@ function formatFieldValue(value, kind) {
   return new Intl.NumberFormat("pt-BR", options).format(value);
 }
 
-async function copyField(input, button) {
-  const value = input.value.trim();
+async function copyField(input, button, omitCurrencySymbol = false) {
+  const value = omitCurrencySymbol
+    ? input.value.trim().replace(/\s*R\$\s*/gi, "")
+    : input.value.trim();
   if (!value) {
     setStatus("Não há valor para copiar. Revise ou preencha o campo primeiro.", "error");
     return;
