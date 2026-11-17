@@ -9,7 +9,7 @@ import {
   STORAGE_KEY,
   createDefaultConfig,
   extractInvoice,
-  normalizeOcrMeasurementLine,
+  normalizeOcrMeasurementRows,
   normalizeText,
   validateConfig,
 } from "./extraction.js";
@@ -31,13 +31,13 @@ const ui = {
   progressBar: document.querySelector("#progress-bar"),
   resultState: document.querySelector("#result-state"),
   resultList: document.querySelector("#result-list"),
+  ocrNotice: document.querySelector("#ocr-notice"),
   issueDate: document.querySelector("#issue-date"),
   dueDate: document.querySelector("#due-date"),
   tariffFlag: document.querySelector("#tariff-flag"),
   configFields: document.querySelector("#config-fields"),
   configStatus: document.querySelector("#config-status"),
   privacyChip: document.querySelector(".privacy-chip"),
-  privacyStrip: document.querySelector(".privacy-strip"),
   updateNotice: document.querySelector("#update-notice"),
 };
 
@@ -51,7 +51,6 @@ let activeOcrProgress = null;
 
 document.querySelector("#app-version").textContent = `VERSÃO ${packageInfo.version}`;
 ui.privacyChip.hidden = !installedApp;
-ui.privacyStrip.hidden = !installedApp;
 renderConfig();
 bindNavigation();
 bindFileSelection();
@@ -134,7 +133,7 @@ function setSelectedFile(file) {
   ui.processButton.disabled = false;
   ui.resultState.textContent = "Pronto para analisar";
   ui.resultState.className = "state-pill";
-  setStatus("Arquivo selecionado. A leitura será feita neste navegador, sem enviar a fatura.");
+  setStatus("Seus arquivos não são enviados nem armazenados pela aplicação.");
 }
 
 async function processSelectedFile() {
@@ -145,10 +144,11 @@ async function processSelectedFile() {
   clearResults();
   try {
     setProgress("Lendo o documento", 0);
-    const lines = await readPdfLines(selectedFile);
+    const { lines, usedOcr } = await readPdfLines(selectedFile);
     if (!lines.length) throw new Error("Não foi possível reconhecer texto ou imagem legível neste PDF.");
     const result = extractInvoice(lines, currentConfig);
     renderResults(result);
+    ui.ocrNotice.hidden = !usedOcr;
     const measurementCount = FIELD_DEFINITIONS.filter((field) => field.measure).length;
     const extracted = FIELD_DEFINITIONS
       .filter((definition) => definition.measure && result.fields[definition.id].status === "review").length;
@@ -180,6 +180,7 @@ async function readPdfLines(file) {
   const bytes = new Uint8Array(await file.arrayBuffer());
   const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
   const allLines = [];
+  let usedOcr = false;
   try {
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const pageStart = 0.05 + ((pageNumber - 1) / pdf.numPages) * 0.9;
@@ -191,6 +192,7 @@ async function readPdfLines(file) {
       if (hasReadablePdfText(pageLines)) {
         allLines.push(...pageLines);
       } else {
+        usedOcr = true;
         const ocrLines = await recognizePage(page, pageNumber, pdf.numPages, pageStart, pageEnd);
         allLines.push(...ocrLines);
       }
@@ -199,7 +201,7 @@ async function readPdfLines(file) {
   } finally {
     await pdf.destroy();
   }
-  return allLines.filter((line) => line.trim());
+  return { lines: allLines.filter((line) => line.trim()), usedOcr };
 }
 
 function hasReadablePdfText(lines) {
@@ -325,9 +327,7 @@ async function recognizeMeasurementTable(page, worker, pageNumber, totalPages, p
     setProgress(activeOcrProgress.message, activeOcrProgress.start);
     const tableResult = await worker.recognize(crop);
     const tableLines = tableResult.data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-    const meterNumber = getOcrTableMeter(tableLines);
-    const rawTableLines = repairMisreadMeterTokens(tableLines, meterNumber);
-    const lines = rawTableLines.map((line) => normalizeOcrMeasurementLine(line, meterNumber)).filter(Boolean);
+    const lines = normalizeOcrMeasurementRows(tableLines, currentConfig.meterNumber);
 
     const messageCrop = createScaledCrop(canvas, 0.07, 0.22, 0.88, 0.16, 2);
     activeOcrProgress = {
@@ -364,38 +364,6 @@ function createScaledCrop(source, x, y, width, height, scale) {
   const context = crop.getContext("2d", { willReadFrequently: true });
   if (context) context.drawImage(source, sourceX, sourceY, sourceWidth, sourceHeight, 0, 0, crop.width, crop.height);
   return crop;
-}
-
-function getOcrTableMeter(lines) {
-  if (currentConfig.meterNumber) return currentConfig.meterNumber;
-  const counts = new Map();
-  for (const line of lines) {
-    const match = line.match(/^\s*(\d{5,30})\s+.*\b(?:ENRG|DEMANDA)\b/i);
-    if (match) counts.set(match[1], (counts.get(match[1]) ?? 0) + 1);
-  }
-  const ranked = [...counts.entries()].sort((left, right) => right[1] - left[1]);
-  return ranked.length && ranked[0][1] >= 3 && ranked[0][1] > (ranked[1]?.[1] ?? 0)
-    ? ranked[0][0]
-    : "";
-}
-
-function repairMisreadMeterTokens(lines, meterNumber) {
-  if (!meterNumber) return lines;
-  const otherMeterRows = lines.some((line) => {
-    const match = line.match(/^\s*(\d{5,30})\s+.*\b(?:ENRG|DEMANDA)\b/i);
-    return match && match[1] !== meterNumber;
-  });
-  if (otherMeterRows) return lines;
-  const matchingRows = lines.filter((line) => line.trim().startsWith(meterNumber) &&
-    /\b(?:ENRG|DEMANDA)\b/i.test(line));
-  if (matchingRows.length < 3) return lines;
-  return lines.map((line) => {
-    const match = line.match(/^\s*\S+(\s+.*)$/);
-    if (!match || !/\b(?:ENRG|DEMANDA)\b/i.test(match[1])) return line;
-    const firstToken = line.trim().split(/\s+/, 1)[0];
-    if (/^\d+$/.test(firstToken)) return line;
-    return `${meterNumber}${match[1]}`;
-  });
 }
 
 function renderResults(result) {
@@ -474,6 +442,7 @@ function renderResults(result) {
 
 function clearResults() {
   ui.resultList.replaceChildren();
+  ui.ocrNotice.hidden = true;
   for (const target of [ui.issueDate, ui.dueDate, ui.tariffFlag]) {
     target.textContent = "—";
     target.removeAttribute("title");
@@ -648,7 +617,7 @@ function bindConfigurationActions() {
     try {
       currentConfig = readConfigForm();
       localStorage.setItem(STORAGE_KEY, JSON.stringify(currentConfig));
-      ui.configStatus.textContent = "Configuração salva apenas neste navegador.";
+    ui.configStatus.textContent = "Configuração salva.";
       ui.configStatus.className = "status-message status-success";
     } catch (error) {
       ui.configStatus.textContent = `Configuração não salva: ${error.message}`;
@@ -685,7 +654,7 @@ async function importConfig(event) {
     currentConfig = imported;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(currentConfig));
     renderConfig();
-    ui.configStatus.textContent = "Regras importadas e salvas neste navegador.";
+    ui.configStatus.textContent = "Regras importadas e salvas.";
     ui.configStatus.className = "status-message status-success";
   } catch (error) {
     ui.configStatus.textContent = `Arquivo de regras inválido: ${error.message}`;
@@ -704,7 +673,7 @@ async function prepareOcr() {
     setProgress("Baixando modelos locais de OCR", 0);
     ui.progressRegion.hidden = false;
     await getOcrWorker();
-    ui.configStatus.textContent = "OCR preparado. Os modelos em português e inglês foram carregados neste navegador.";
+    ui.configStatus.textContent = "OCR preparado para uso offline.";
     ui.configStatus.className = "status-message status-success";
   } catch (error) {
     ui.configStatus.textContent = `Não foi possível preparar o OCR: ${error.message}`;

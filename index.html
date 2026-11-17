@@ -58,7 +58,7 @@
         <section class="view active" id="extract-view" aria-labelledby="page-title">
           <div class="hero">
             <div class="hero-copy">
-              <p class="eyebrow">LEITURA LOCAL DE PDF · ARQUIVOS NÃO ENVIADOS</p>
+              <p class="eyebrow">FATURAS DE ENERGIA</p>
               <h1 id="page-title">Leitor de faturas <span>de energia.</span></h1>
               <p class="hero-description">
                 Selecione uma fatura em PDF, revise os campos identificados e copie os valores necessários.
@@ -88,7 +88,6 @@
                 </span>
                 <strong id="file-name">Arraste o PDF para cá</strong>
                 <span class="dropzone-hint">ou escolha um arquivo do seu dispositivo</span>
-                <span class="file-limit">PDF · arquivo processado apenas nesta página</span>
               </label>
               <button id="process-button" class="button button-primary button-wide" type="button" disabled>
                 <span class="button-symbol" aria-hidden="true">↗</span>
@@ -103,6 +102,9 @@
               </div>
               <p id="app-status" class="status-message" role="status" aria-live="polite">
                 Seus arquivos não são enviados nem armazenados pela aplicação.
+              </p>
+              <p id="ocr-notice" class="ocr-notice" role="note" hidden>
+                Esta fatura foi processada com OCR (Reconhecimento Óptico de Caracteres). O OCR converte a imagem em texto e pode confundir letras e números; confira os valores com a fatura.
               </p>
             </section>
 
@@ -142,15 +144,6 @@
             </section>
           </div>
 
-          <section class="privacy-strip" aria-label="Privacidade">
-            <span class="privacy-shield" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none">
-                <path d="M12 3 19 6v5c0 4.5-2.8 7.7-7 10-4.2-2.3-7-5.5-7-10V6l7-3Z" />
-                <path d="m9 12 2 2 4-4" />
-              </svg>
-            </span>
-            <p><strong>Processamento local.</strong> PDF e OCR são processados neste navegador. A aplicação consulta a internet para carregar os arquivos do app e receber atualizações do navegador.</p>
-          </section>
           <div id="update-notice" class="update-notice" role="status" hidden></div>
         </section>
 
@@ -183,7 +176,7 @@
             <div>
               <p class="eyebrow">LEITURA DE PDF DIGITALIZADO</p>
               <h2>Preparar OCR para uso offline</h2>
-              <p>O mecanismo e os modelos em português e inglês serão carregados uma vez e ficarão disponíveis no cache deste navegador. Não envie documentos durante essa preparação.</p>
+              <p>Os modelos em português e inglês serão baixados para preparar o OCR para uso offline.</p>
             </div>
             <button id="prepare-ocr" class="button button-quiet" type="button">Preparar OCR</button>
           </section>
@@ -193,7 +186,7 @@
       <footer class="site-footer">
         <span>EXTRAICONTA <span class="footer-divider">/</span> FERRAMENTA LOCAL</span>
         <span class="footer-credit">Developed by <a href="https://github.com/LeowLopez" target="_blank" rel="noopener noreferrer">1T Leônnyo</a></span>
-        <span id="app-version">VERSÃO 2.0.1</span>
+        <span id="app-version">VERSÃO 2.0.5</span>
       </footer>
     </div>
     <script type="module" src="./src/theme.js"></script>

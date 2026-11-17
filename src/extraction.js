@@ -221,7 +221,9 @@ export function parseLocalizedNumber(value) {
   const clean = String(value).replace(/[^\d,.-]/g, "");
   if (!clean || !/\d/.test(clean)) return null;
   let normalized = clean;
-  if (clean.includes(",")) {
+  if (/^-?\d{1,3}(,\d{3})+\.\d{1,2}$/.test(clean)) {
+    normalized = clean.replace(/,/g, "");
+  } else if (clean.includes(",")) {
     normalized = clean.replace(/\./g, "").replace(",", ".");
   } else if (/\.\d{3}$/.test(clean)) {
     normalized = clean.replace(/\./g, "");
@@ -284,6 +286,57 @@ export function normalizeOcrMeasurementLine(line, meterNumber = DEFAULT_METER_NU
     ? `${cleanValue.slice(0, separator).replace(/[.,]/g, "")},${cleanValue.slice(separator + 1)}`
     : cleanValue;
   return `${meterNumber} ${parsed.measure} ${parsed.post} 0 0 0 ${normalizedValue} [OCR: ${line}]`;
+}
+
+export function normalizeOcrMeasurementRows(lines, configuredMeter = DEFAULT_METER_NUMBER) {
+  const rowParts = lines.map((line) => {
+    const match = String(line).match(/^\s*(\S+)(\s+.*)$/);
+    return match && /\b(?:ENRG|DEMANDA)\b/i.test(match[2])
+      ? { line: String(line), meter: match[1], remainder: match[2] }
+      : null;
+  }).filter(Boolean);
+  const meterCounts = new Map();
+  for (const row of rowParts) {
+    if (/^\d{5,30}$/.test(row.meter)) meterCounts.set(row.meter, (meterCounts.get(row.meter) ?? 0) + 1);
+  }
+  let meterNumber = configuredMeter;
+  if (!meterNumber) {
+    const ranked = [...meterCounts.entries()].sort((left, right) => right[1] - left[1]);
+    if (ranked.length && ranked[0][1] >= 3 && ranked[0][1] > (ranked[1]?.[1] ?? 0)) meterNumber = ranked[0][0];
+  }
+  if (!meterNumber) return [];
+
+  const exactCount = meterCounts.get(meterNumber) ?? 0;
+  const hasCompetingMeter = [...meterCounts.entries()].some(([candidate, count]) => candidate !== meterNumber && count >= 3);
+  return rowParts.flatMap((row) => {
+    let line = row.line;
+    if (row.meter !== meterNumber) {
+      if (hasCompetingMeter || exactCount < 3 ||
+        (/^\d+$/.test(row.meter) && (meterCounts.get(row.meter) ?? 0) >= 3 && editDistance(row.meter, meterNumber) > 2)) {
+        return [];
+      }
+      if (/^\d+$/.test(row.meter) && editDistance(row.meter, meterNumber) > 2) return [];
+      line = `${meterNumber}${row.remainder}`;
+    }
+    const normalized = normalizeOcrMeasurementLine(line, meterNumber);
+    return normalized ? [normalized] : [];
+  });
+}
+
+function editDistance(left, right) {
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    const current = [leftIndex];
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + (left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1),
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[right.length];
 }
 
 function isNumericToken(token) {
@@ -382,6 +435,11 @@ export function extractConfiguredField(lines, rule) {
   const candidates = matches.map((match) => {
     const normalizedText = normalizeText(match.text);
     const aliasIndex = normalizedText.indexOf(match.matchedAlias);
+    if (rule.kind === "currency") {
+      const currencyCandidate = findNearbyCurrencyAmount(lines, match, aliasIndex);
+      if (currencyCandidate) return { ...match, ...currencyCandidate };
+      if (isDocumentSummaryHeader(lines[match.index])) return null;
+    }
     const afterAlias = extractNumberAfter(match.text, aliasIndex + match.matchedAlias.length);
     if (afterAlias !== null) return { ...match, value: afterAlias };
     if (rule.nextLine && lines[match.index + 1]) {
@@ -403,6 +461,45 @@ export function extractConfiguredField(lines, rule) {
   }
   const selected = rule.operation === "last" ? candidates.at(-1) : candidates[0];
   return { value: selected.value, sourceLine: selected.text, status: "review" };
+}
+
+function findNearbyCurrencyAmount(lines, match, aliasIndex) {
+  const documentSummaryHeader = isDocumentSummaryHeader(lines[match.index]);
+  const offsets = documentSummaryHeader
+    ? Array.from({ length: lines.length }, (_, index) => index - match.index)
+      .filter((offset) => offset !== 0)
+      .sort((left, right) => Math.abs(left) - Math.abs(right) || right - left)
+    : [0, ...Array.from({ length: Math.min(4, lines.length - match.index - 1) }, (_, index) => index + 1)];
+
+  for (const offset of offsets) {
+    const lineIndex = match.index + offset;
+    const sourceLine = lines[lineIndex];
+    const normalizedLine = normalizeText(sourceLine);
+    if (/SUBTOTAL\s+FATURAMENTO|SUBTOTAL\s+OUTROS/.test(normalizedLine)) continue;
+    const start = offset === 0 ? aliasIndex + match.matchedAlias.length : 0;
+    const slice = sourceLine.slice(start);
+    const currency = slice.match(/R\s*[$S5]\s*(-?\d+(?:[.,]\d{3})*[.,]\d{2})(?!\d)/i);
+    const nearbyBareAmount = documentSummaryHeader && Math.abs(offset) <= 3
+      ? slice.match(/(-?\d+(?:\.\d{3})*,\d{2})\s*$/)
+      : null;
+    const amount = currency?.[1] ?? nearbyBareAmount?.[1];
+    if (!amount) continue;
+    if (documentSummaryHeader && parseDates(sourceLine).length < 1 && Math.abs(offset) > 3) continue;
+    const value = parseLocalizedNumber(amount);
+    if (value === null) continue;
+    return {
+      value,
+      text: lineIndex === match.index ? sourceLine : `${lines[match.index]}\n${sourceLine}`,
+    };
+  }
+  return null;
+}
+
+function isDocumentSummaryHeader(line) {
+  const header = normalizeText(line);
+  return /DATA DE EMIS/.test(header) &&
+    /VALOR DO DOCUMENTO/.test(header) &&
+    /(?:NOTA FISCAL|REFERENCIA|DATA DE VENCIMENTO)/.test(header);
 }
 
 function extractNumberAfter(text, start) {
@@ -487,7 +584,7 @@ export function extractInvoice(lines, config) {
     } else {
       result = extractConfiguredField(lines, {
         ...definition,
-        aliases: config.grossValueAliases,
+        aliases: [...new Set([...DEFAULT_GROSS_VALUE_ALIASES, ...config.grossValueAliases])],
       });
     }
     return [definition.id, { ...result, kind: definition.kind }];

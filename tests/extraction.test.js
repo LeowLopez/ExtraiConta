@@ -6,6 +6,7 @@ import {
   extractNumberCandidates,
   normalizeText,
   normalizeOcrMeasurementLine,
+  normalizeOcrMeasurementRows,
   parseMeasurementLine,
   parseLocalizedNumber,
   validateConfig,
@@ -21,6 +22,7 @@ test("parses Brazilian decimal and thousands separators", () => {
   assert.equal(parseLocalizedNumber("1.234,567"), 1234.567);
   assert.equal(parseLocalizedNumber("123,45"), 123.45);
   assert.equal(parseLocalizedNumber("1.234"), 1234);
+  assert.equal(parseLocalizedNumber("38,839.76"), 38839.76);
 });
 
 test("parses Enel measurement rows after the meter, measure, post, and three register values", () => {
@@ -52,6 +54,30 @@ test("keeps legacy parsing of dotted thousands separators for text PDFs", () => 
   assert.equal(parseMeasurementLine(line, TEST_METER_NUMBER)?.value, 1234);
 });
 
+test("recovers an isolated OCR error in the meter number without mixing another meter", () => {
+  const config = createDefaultConfig();
+  config.meterNumber = TEST_METER_NUMBER;
+  const lines = normalizeOcrMeasurementRows([
+    `${TEST_METER_NUMBER} ENRG ATV F PONTA 1 2 1 120,000`,
+    `${TEST_METER_NUMBER} ENRG RTV PONTA 1 2 1 140,000`,
+    `${TEST_METER_NUMBER} DEMANDA F PONTA INDU 1 2 1 125,000`,
+    "12345679 ENRG ATV PONTA 292 366 0,06300 92,232",
+  ], TEST_METER_NUMBER);
+  const data = extractInvoice(lines, config);
+  assert.equal(data.fields.consumo_na_ponta.value, 92.232);
+
+  const mixedLines = normalizeOcrMeasurementRows([
+    `${TEST_METER_NUMBER} ENRG ATV F PONTA 1 2 1 120,000`,
+    `${TEST_METER_NUMBER} ENRG RTV PONTA 1 2 1 140,000`,
+    `${TEST_METER_NUMBER} DEMANDA F PONTA INDU 1 2 1 125,000`,
+    "87654321 ENRG ATV PONTA 292 366 0,06300 999,999",
+    "87654321 ENRG ATV F PONTA 1 2 1 900,000",
+    "87654321 ENRG RTV PONTA 1 2 1 800,000",
+  ], TEST_METER_NUMBER);
+  const mixedData = extractInvoice(mixedLines, config);
+  assert.equal(mixedData.fields.consumo_na_ponta.value, null);
+});
+
 test("extracts meter measurements from OCR rows with the invoice table layout", () => {
   const config = createDefaultConfig();
   config.meterNumber = TEST_METER_NUMBER;
@@ -64,8 +90,9 @@ test("extracts meter measurements from OCR rows with the invoice table layout", 
     `${TEST_METER_NUMBER} DEMANDA F PONTA INDU 1.301 1.233 0,25200 310,716`,
     `${TEST_METER_NUMBER} ENRG RTV PONTA 698.548 706.221 0,06300 483,399`,
     `${TEST_METER_NUMBER} ENRG RTV FPONTAINDU 7.525.711 — 7.599.144 0,06300 4.626,279`,
-  ].map((line) => normalizeOcrMeasurementLine(line, TEST_METER_NUMBER)).filter(Boolean);
-  const data = extractInvoice(ocrLines, config);
+  ];
+  const normalizedOcrLines = normalizeOcrMeasurementRows(ocrLines, TEST_METER_NUMBER);
+  const data = extractInvoice(normalizedOcrLines, config);
   assert.equal(data.fields.consumo_fora_ponta.value, 42146.37);
   assert.equal(data.fields.consumo_na_ponta.value, 3213.945);
   assert.equal(data.fields.demanda_faturada_fora_ponta.value, 310.716);
@@ -128,6 +155,71 @@ test("reads gross value from the line below its label and supports custom aliase
     "Vencimento 20/10/2026 Referência 10/2026 R$ 987,65",
   ], config);
   assert.equal(data.fields.valor_bruto.value, 987.65);
+});
+
+test("keeps built-in gross-value labels when the saved custom alias list is empty", () => {
+  const config = createDefaultConfig();
+  config.grossValueAliases = [];
+  const data = extractInvoice([
+    "[DATA DE EMISSÃO: NOTA FISCAL: |REFERENCIA: [DATA DE VENCIMENTO: | VALOR DO DOCUMENTO: 2 Ny yt ef",
+    "02/10/2026 000086219 10/2026 23/11/2026 R$ 38.839,76",
+  ], config);
+  assert.equal(data.fields.valor_bruto.value, 38839.76);
+});
+
+test("prefers the currency amount over an OCR digit immediately after the gross-value label", () => {
+  const data = extractInvoice([
+    "[DATA DE EMISSÃO: NOTA FISCAL: |REFERENCIA: [DATA DE VENCIMENTO: | VALOR DO DOCUMENTO: 2 Ny yt ef",
+    "SUBTOTAL FATURAMENTO R$ 39.946,03",
+    "02/10/2026 000086219 10/2026 23/11/2026 R$ 38.839,76",
+  ], createDefaultConfig());
+  assert.equal(data.fields.valor_bruto.value, 38839.76);
+  assert.match(data.fields.valor_bruto.sourceLine, /R\$ 38\.839,76/);
+  assert.doesNotMatch(data.fields.valor_bruto.sourceLine, /39\.946,03/);
+});
+
+test("does not treat the invoice number after the document-value label as money", () => {
+  const data = extractInvoice([
+    "[DATA DE EMISSÃO: NOTA FISCAL: |REFERENCIA: [DATA DE VENCIMENTO: | VALOR DO DOCUMENTO: 2 Ny yt ef",
+    "SUBTOTAL FATURAMENTO R$ 39.946,03",
+  ], createDefaultConfig());
+  assert.equal(data.fields.valor_bruto.value, null);
+  assert.doesNotMatch(data.fields.valor_bruto.sourceLine, /39\.946,03/);
+});
+
+test("finds the document value when OCR separates its dated row from the header", () => {
+  const data = extractInvoice([
+    "[DATA DE EMISSÃƒO: NOTA FISCAL: |REFERENCIA: [DATA DE VENCIMENTO: | VALOR DO DOCUMENTO: 2 Ny yt ef",
+    "SUBTOTAL FATURAMENTO R$ 39.946,03",
+    "texto reconhecido fora da ordem visual",
+    "texto reconhecido fora da ordem visual",
+    "texto reconhecido fora da ordem visual",
+    "texto reconhecido fora da ordem visual",
+    "texto reconhecido fora da ordem visual",
+    "texto reconhecido fora da ordem visual",
+    "texto reconhecido fora da ordem visual",
+    "texto reconhecido fora da ordem visual",
+    "texto reconhecido fora da ordem visual",
+    "02/10/2026 000086219 10/2026 23/11/2026 R$ 38.839,76",
+  ], createDefaultConfig());
+  assert.equal(data.fields.valor_bruto.value, 38839.76);
+  assert.doesNotMatch(data.fields.valor_bruto.sourceLine, /39\.946,03/);
+});
+
+test("recognizes OCR substitutions for the currency symbol and a split amount cell", () => {
+  for (const currency of ["RS 38.839,76", "R5 38.839,76"]) {
+    const data = extractInvoice([
+      "[DATA DE EMISSÃO: NOTA FISCAL: |REFERENCIA: [DATA DE VENCIMENTO: | VALOR DO DOCUMENTO: 2 Ny yt ef",
+      `02/10/2026 000086219 10/2026 23/11/2026 ${currency}`,
+    ], createDefaultConfig());
+    assert.equal(data.fields.valor_bruto.value, 38839.76);
+  }
+
+  const split = extractInvoice([
+    "[DATA DE EMISSÃO: NOTA FISCAL: |REFERENCIA: [DATA DE VENCIMENTO: | VALOR DO DOCUMENTO:",
+    "38.839,76",
+  ], createDefaultConfig());
+  assert.equal(split.fields.valor_bruto.value, 38839.76);
 });
 
 test("matches dates to labels when the invoice places values on the next line", () => {

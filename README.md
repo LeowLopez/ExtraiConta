@@ -1,8 +1,6 @@
 # ExtraiConta
 
-Aplicação web para ler faturas de energia e revisar os dados extraídos. PDFs,
-resultados e configurações são processados localmente no navegador e não são
-enviados a um servidor.
+Aplicação web para ler faturas de energia e revisar os dados extraídos.
 
 ## Requisitos
 
